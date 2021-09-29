@@ -1,4 +1,4 @@
-package ar.juanedu.pocs.springbatchauthselector;
+package ar.juanedu.pocs.springbatchparallelrun;
 
 import org.springframework.batch.core.configuration.annotation.EnableBatchProcessing;
 import org.springframework.boot.SpringApplication;
@@ -6,10 +6,10 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 @EnableBatchProcessing
 @SpringBootApplication
-public class SpringBatchAuthSelectorApplication {
+public class SpringBatchAuthParallelApplication {
 
 	public static void main(String[] args) {
-		SpringApplication.run(SpringBatchAuthSelectorApplication.class, args);
+		SpringApplication.run(SpringBatchAuthParallelApplication.class, args);
 	}
 
 }
