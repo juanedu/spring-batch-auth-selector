@@ -2,25 +2,24 @@ package ar.juanedu.pocs.springbatchparallelrun;
 
 import ar.juanedu.pocs.util.Foo;
 import ar.juanedu.pocs.util.StepLogListener;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.activemq.ActiveMQConnectionFactory;
 import org.springframework.batch.core.Job;
 import org.springframework.batch.core.JobExecution;
 import org.springframework.batch.core.JobParametersBuilder;
 import org.springframework.batch.core.Step;
-import org.springframework.batch.core.configuration.JobRegistry;
 import org.springframework.batch.core.configuration.annotation.EnableBatchProcessing;
 import org.springframework.batch.core.configuration.annotation.JobBuilderFactory;
 import org.springframework.batch.core.configuration.annotation.StepBuilderFactory;
 import org.springframework.batch.core.configuration.annotation.StepScope;
 import org.springframework.batch.core.explore.JobExplorer;
 import org.springframework.batch.core.launch.JobLauncher;
-import org.springframework.batch.core.launch.JobOperator;
 import org.springframework.batch.core.launch.support.RunIdIncrementer;
 import org.springframework.batch.core.launch.support.SimpleJobLauncher;
-import org.springframework.batch.core.launch.support.SimpleJobOperator;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.batch.integration.config.annotation.EnableBatchIntegration;
 import org.springframework.batch.item.ItemProcessor;
+import org.springframework.batch.item.ItemReader;
 import org.springframework.batch.item.ItemWriter;
 import org.springframework.batch.item.jms.JmsItemReader;
 import org.springframework.batch.item.jms.JmsItemWriter;
@@ -50,6 +49,7 @@ import java.util.UUID;
 @EnableBatchProcessing
 @EnableBatchIntegration
 @SpringBootApplication
+@Slf4j
 public class SpringBatchAuthParallelApplication {
 
 	@Value("${spring.activemq.broker-url}")
@@ -80,9 +80,9 @@ public class SpringBatchAuthParallelApplication {
 	public Step step1() throws Exception {
 		return this.stepBuilderFactory.get("step1")
 				.<Foo, Foo>chunk(10)
-				.reader(itemReader(null))
+				.reader(fromAListWithSize(null))
 				.processor(itemProcessor())
-				.writer(jmsItemWriter(giveMeTheJmsTemplate()))
+				.writer(toAMsgQueue(withThisJmsTemplate()))
 				.listener(new StepLogListener())
 				.build();
 	}
@@ -90,53 +90,30 @@ public class SpringBatchAuthParallelApplication {
 	public Step step2() throws Exception {
 		return this.stepBuilderFactory.get("step2")
 				.<Foo, Foo>chunk(10)
-				.reader(jmsItemReader(giveMeTheJmsTemplate()))
+				.reader(fromAMsgQueue(withThisJmsTemplate()))
 				.processor(itemProcessor())
-				.writer(itemWriter())
+				.writer(toDevNull())
 				.listener(new StepLogListener())
 				.build();
 	}
+
 	@Bean
 	public Job jmsJob() throws Exception {
 		return this.jobBuilderFactory.get("jmsJob")
 				.incrementer(new RunIdIncrementer())
 				.start(step1())
-				//.next(step2())
+				.next(step2())
 				.build();
 	}
 
 	@Bean
-	public JobLauncher myJobLauncher() throws Exception {
-		SimpleJobLauncher jobLauncher = new SimpleJobLauncher();
-		jobLauncher.setTaskExecutor(taskExecutor());
-		jobLauncher.setJobRepository(jobRepository);
-		jobLauncher.afterPropertiesSet();
-		return jobLauncher;
-	}
-
-	@Bean
-	public JobOperator jobOperator(JobRegistry jobRegistry) throws Exception {
-		SimpleJobOperator jobOperator = new SimpleJobOperator();
-		jobOperator.setJobExplorer(jobExplorer);
-		jobOperator.setJobLauncher(myJobLauncher());
-		jobOperator.setJobRegistry(jobRegistry);
-		jobOperator.setJobRepository(jobRepository);
-		return jobOperator;
-	}
-
-	@Bean
-	public TaskExecutor taskExecutor() {
-		ThreadPoolTaskExecutor taskExecutor = new ThreadPoolTaskExecutor();
-		taskExecutor.setCorePoolSize(10);
-		taskExecutor.setMaxPoolSize(20);
-		taskExecutor.setQueueCapacity(30);
-		return taskExecutor;
-	}
-
-	@Bean
 	@StepScope //para que se cree la lista en cada ejecucion del step
-	public ListItemReader<Foo> itemReader(
+	public ItemReader<Foo> fromAListWithSize (
 			@Value("#{jobParameters['inputSize']}") String inputSize) {
+
+		if (inputSize == null) {
+			throw new IllegalArgumentException();
+		}
 
 		int thisLength = Integer.parseInt(inputSize);
 		List<Foo> items = new ArrayList<>(thisLength);
@@ -144,7 +121,7 @@ public class SpringBatchAuthParallelApplication {
 			items.add(new Foo(
 					UUID.randomUUID().toString(),
 					i,
-					giveMeTheProcessor())
+					giveMeARoutingProcessor())
 			);
 		}
 		return new ListItemReader<>(items);
@@ -156,29 +133,58 @@ public class SpringBatchAuthParallelApplication {
 	}
 
 	@Bean
-	public ItemWriter<Foo> itemWriter() {
+	public ItemWriter<Foo> toDevNull() {
 		return items -> {
 			//items.stream().map(item -> ">> current item = " + item).forEach(System.out::println);
 		};
 	}
 
 	@Bean
-	public JmsItemReader<Foo> jmsItemReader(JmsTemplate jmsTemplate) {
+	public JmsItemReader<Foo> fromAMsgQueue(JmsTemplate jmsTemplate) {
 		return new JmsItemReaderBuilder<Foo>()
 				.jmsTemplate(jmsTemplate)
 				.itemType(Foo.class)
 				.build();
 	}
 	@Bean
-	public JmsItemWriter<Foo> jmsItemWriter(JmsTemplate jmsTemplate) {
+	public JmsItemWriter<Foo> toAMsgQueue(JmsTemplate jmsTemplate) {
 		return new JmsItemWriterBuilder<Foo>()
 				.jmsTemplate(jmsTemplate)
 				.build();
 	}
 
+	// Spring Batch shit
+	@Bean
+	public JobLauncher myJobLauncher() throws Exception {
+		SimpleJobLauncher jobLauncher = new SimpleJobLauncher();
+		jobLauncher.setTaskExecutor(taskExecutor());
+		jobLauncher.setJobRepository(jobRepository);
+		jobLauncher.afterPropertiesSet();
+		return jobLauncher;
+	}
+
+//	@Bean
+//	public JobOperator jobOperator(JobRegistry jobRegistry) throws Exception {
+//		SimpleJobOperator jobOperator = new SimpleJobOperator();
+//		jobOperator.setJobExplorer(jobExplorer);
+//		jobOperator.setJobLauncher(myJobLauncher());
+//		jobOperator.setJobRegistry(jobRegistry);
+//		jobOperator.setJobRepository(jobRepository);
+//		return jobOperator;
+//	}
+
+	@Bean
+	public TaskExecutor taskExecutor() {
+		ThreadPoolTaskExecutor taskExecutor = new ThreadPoolTaskExecutor();
+		taskExecutor.setCorePoolSize(10);
+		taskExecutor.setMaxPoolSize(20);
+		taskExecutor.setQueueCapacity(30);
+		return taskExecutor;
+	}
+
 	// JMS shit
 	@Bean
-	public JmsTemplate giveMeTheJmsTemplate() {
+	public JmsTemplate withThisJmsTemplate() {
 		JmsTemplate jmsTemplate = new JmsTemplate();
 		jmsTemplate.setConnectionFactory(jmsConnectionFactory());
 		jmsTemplate.setDefaultDestinationName(this.queue);
@@ -206,7 +212,7 @@ public class SpringBatchAuthParallelApplication {
 	}
 
 	// Other shit
-	private String giveMeTheProcessor() {
+	private String giveMeARoutingProcessor() {
 		return  (Math.random() * 3 + 1) > 3 ? "N" : "V";
 	}
 
@@ -215,6 +221,7 @@ public class SpringBatchAuthParallelApplication {
 		//application.run(args);
 
 		Properties properties = new Properties();
+		// evita que se lance el job automaticamente al arrancar.
 		properties.put("spring.batch.job.enabled", false);
 		application.setDefaultProperties(properties);
 
