@@ -1,13 +1,10 @@
 package ar.juanedu.pocs.springbatchparallelrun;
 
 import ar.juanedu.pocs.util.Foo;
-import ar.juanedu.pocs.util.StepLogListener;
+import ar.juanedu.pocs.util.JmsSelectorItemReader;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.activemq.ActiveMQConnectionFactory;
-import org.springframework.batch.core.Job;
-import org.springframework.batch.core.JobExecution;
-import org.springframework.batch.core.JobParametersBuilder;
-import org.springframework.batch.core.Step;
+import org.springframework.batch.core.*;
 import org.springframework.batch.core.configuration.annotation.EnableBatchProcessing;
 import org.springframework.batch.core.configuration.annotation.JobBuilderFactory;
 import org.springframework.batch.core.configuration.annotation.StepBuilderFactory;
@@ -17,13 +14,12 @@ import org.springframework.batch.core.launch.JobLauncher;
 import org.springframework.batch.core.launch.support.RunIdIncrementer;
 import org.springframework.batch.core.launch.support.SimpleJobLauncher;
 import org.springframework.batch.core.repository.JobRepository;
-import org.springframework.batch.integration.config.annotation.EnableBatchIntegration;
 import org.springframework.batch.item.ItemProcessor;
 import org.springframework.batch.item.ItemReader;
 import org.springframework.batch.item.ItemWriter;
-import org.springframework.batch.item.jms.JmsItemReader;
+import org.springframework.batch.item.file.FlatFileItemWriter;
+import org.springframework.batch.item.file.builder.FlatFileItemWriterBuilder;
 import org.springframework.batch.item.jms.JmsItemWriter;
-import org.springframework.batch.item.jms.builder.JmsItemReaderBuilder;
 import org.springframework.batch.item.jms.builder.JmsItemWriterBuilder;
 import org.springframework.batch.item.support.ListItemReader;
 import org.springframework.batch.item.support.PassThroughItemProcessor;
@@ -33,11 +29,13 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Bean;
+import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.task.TaskExecutor;
 import org.springframework.jms.core.JmsTemplate;
 import org.springframework.jms.support.converter.MappingJackson2MessageConverter;
 import org.springframework.jms.support.converter.MessageConverter;
 import org.springframework.jms.support.converter.MessageType;
+import org.springframework.lang.Nullable;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 import javax.jms.ConnectionFactory;
@@ -47,7 +45,6 @@ import java.util.Properties;
 import java.util.UUID;
 
 @EnableBatchProcessing
-@EnableBatchIntegration
 @SpringBootApplication
 @Slf4j
 public class SpringBatchAuthParallelApplication {
@@ -76,40 +73,42 @@ public class SpringBatchAuthParallelApplication {
 	@Autowired
 	private StepBuilderFactory stepBuilderFactory;
 
-	@Bean
-	public Step step1() throws Exception {
-		return this.stepBuilderFactory.get("step1")
-				.<Foo, Foo>chunk(10)
-				.reader(fromAListWithSize(null))
-				.processor(itemProcessor())
-				.writer(toAMsgQueue(withThisJmsTemplate()))
-				.listener(new StepLogListener())
-				.build();
-	}
-	@Bean
-	public Step step2() throws Exception {
-		return this.stepBuilderFactory.get("step2")
-				.<Foo, Foo>chunk(10)
-				.reader(fromAMsgQueue(withThisJmsTemplate()))
-				.processor(itemProcessor())
-				.writer(toDevNull())
-				.listener(new StepLogListener())
+	@Bean // Job configuration
+	public Job jmsJob() {
+		return this.jobBuilderFactory.get("jmsJob")
+				.incrementer(new RunIdIncrementer())
+				.start(splitFalopInfoByProcessor())
+				.next(step2())
 				.build();
 	}
 
 	@Bean
-	public Job jmsJob() throws Exception {
-		return this.jobBuilderFactory.get("jmsJob")
-				.incrementer(new RunIdIncrementer())
-				.start(step1())
-				.next(step2())
+	public Step splitFalopInfoByProcessor() {
+
+		return this.stepBuilderFactory.get("splitFalopInfoByProcessor")
+				.<Foo, Foo>chunk(10)
+				.reader(fromAListWithSize(null))
+				.processor(doNothing())
+				.writer(toAMsgQueueWithSelector(withThisJmsTemplate(), null))
+				//.listener(new StepLogListener())
+				.build();
+	}
+
+	@Bean
+	public Step step2() {
+		return this.stepBuilderFactory.get("step2")
+				.<Foo, Foo>chunk(10)
+				.reader(fromAMsgQueueWithSelector(withThisJmsTemplate(), null))
+				.processor(justLogDaFackingObject())
+				.writer(toDevNull())
+				//.listener(new StepLogListener())
 				.build();
 	}
 
 	@Bean
 	@StepScope //para que se cree la lista en cada ejecucion del step
 	public ItemReader<Foo> fromAListWithSize (
-			@Value("#{jobParameters['inputSize']}") String inputSize) {
+			@Value("#{jobParameters['inputSize']}") String inputSize) throws IllegalArgumentException {
 
 		if (inputSize == null) {
 			throw new IllegalArgumentException();
@@ -121,36 +120,80 @@ public class SpringBatchAuthParallelApplication {
 			items.add(new Foo(
 					UUID.randomUUID().toString(),
 					i,
-					giveMeARoutingProcessor())
+					giveMeARoutingProcessor(),
+					inputSize)
 			);
 		}
 		return new ListItemReader<>(items);
 	}
 
-	public ItemProcessor<Foo, Foo> itemProcessor()
+	public ItemProcessor<Foo, Foo> doNothing()
 	{
 		return new PassThroughItemProcessor<>();
 	}
 
-	@Bean
-	public ItemWriter<Foo> toDevNull() {
-		return items -> {
-			//items.stream().map(item -> ">> current item = " + item).forEach(System.out::println);
+	public ItemProcessor<Foo, Foo> justLogDaFackingObject()
+	{
+		return item -> {
+			log.info(item.toString());
+			return item;
 		};
 	}
 
-	@Bean
-	public JmsItemReader<Foo> fromAMsgQueue(JmsTemplate jmsTemplate) {
-		return new JmsItemReaderBuilder<Foo>()
-				.jmsTemplate(jmsTemplate)
-				.itemType(Foo.class)
-				.build();
+	public ItemWriter<Foo> toDevNull()
+	{
+		return items -> {};
 	}
+
 	@Bean
+	@StepScope
+	public FlatFileItemWriter<Foo> toACsvFileNamed(
+			@Value("#{jobParameters['inputSize']}.csv") FileSystemResource filename) {
+			return new FlatFileItemWriterBuilder<Foo>()
+					.name("customerItemWriter")
+					.resource(filename)
+					.delimited()
+					.names(new String[] {"s",
+							"counter",
+							"processor",
+							"totalSize"})
+					.build();
+	}
+
+	@Bean
+	@StepScope
+	public JmsSelectorItemReader<Foo> fromAMsgQueueWithSelector(
+			JmsTemplate jmsTemplate,
+			@Value("#{stepExecution}") StepExecution stepExecution) {
+
+		long selector = stepExecution.getJobExecution().getJobInstance().getInstanceId();
+
+		JmsSelectorItemReader<Foo> jmsSelectorItemReader = new JmsSelectorItemReader<>();
+
+		jmsSelectorItemReader.setJmsTemplate(jmsTemplate);
+		jmsSelectorItemReader.setItemType(Foo.class);
+		jmsSelectorItemReader.setSelector("jobInstance = " + Long.valueOf(selector).toString());
+
+		return jmsSelectorItemReader;
+	}
+
 	public JmsItemWriter<Foo> toAMsgQueue(JmsTemplate jmsTemplate) {
 		return new JmsItemWriterBuilder<Foo>()
 				.jmsTemplate(jmsTemplate)
 				.build();
+	}
+
+	@Bean
+	@StepScope
+	public ItemWriter<Foo> toAMsgQueueWithSelector(
+			JmsTemplate jmsTemplate,
+			@Value("#{stepExecution}") StepExecution stepExecution) {
+		long selector = stepExecution.getJobExecution().getJobInstance().getInstanceId();
+
+		return list -> list.forEach(item -> jmsTemplate.convertAndSend(item, messagePostProcessor -> {
+			messagePostProcessor.setLongProperty("jobInstance", selector);
+			return messagePostProcessor;
+		}));
 	}
 
 	// Spring Batch shit
@@ -162,16 +205,6 @@ public class SpringBatchAuthParallelApplication {
 		jobLauncher.afterPropertiesSet();
 		return jobLauncher;
 	}
-
-//	@Bean
-//	public JobOperator jobOperator(JobRegistry jobRegistry) throws Exception {
-//		SimpleJobOperator jobOperator = new SimpleJobOperator();
-//		jobOperator.setJobExplorer(jobExplorer);
-//		jobOperator.setJobLauncher(myJobLauncher());
-//		jobOperator.setJobRegistry(jobRegistry);
-//		jobOperator.setJobRepository(jobRepository);
-//		return jobOperator;
-//	}
 
 	@Bean
 	public TaskExecutor taskExecutor() {
@@ -185,8 +218,7 @@ public class SpringBatchAuthParallelApplication {
 	// JMS shit
 	@Bean
 	public JmsTemplate withThisJmsTemplate() {
-		JmsTemplate jmsTemplate = new JmsTemplate();
-		jmsTemplate.setConnectionFactory(jmsConnectionFactory());
+		JmsTemplate jmsTemplate = new JmsTemplate(jmsConnectionFactory());
 		jmsTemplate.setDefaultDestinationName(this.queue);
 		jmsTemplate.setMessageConverter(jacksonJmsMessageConverter());
 		jmsTemplate.setReceiveTimeout(500);
@@ -203,7 +235,7 @@ public class SpringBatchAuthParallelApplication {
 		return connectionFactory;
 	}
 
-	@Bean // Serialize message content to json using TextMessage
+	// Serialize message content to json using TextMessage
 	public MessageConverter jacksonJmsMessageConverter() {
 		MappingJackson2MessageConverter converter = new MappingJackson2MessageConverter();
 		converter.setTargetType(MessageType.TEXT);
@@ -234,9 +266,11 @@ public class SpringBatchAuthParallelApplication {
 
 		try {
 			JobExecution jobExecution1 = jobLauncher.run(job, new JobParametersBuilder(jex)
-					.getNextJobParameters(job).addString("inputSize", "500").toJobParameters());
+					.getNextJobParameters(job).addString("inputSize", "100").toJobParameters());
 			JobExecution jobExecution2 = jobLauncher.run(job, new JobParametersBuilder(jex)
-					.getNextJobParameters(job).addString("inputSize", "750").toJobParameters());
+					.getNextJobParameters(job).addString("inputSize", "15").toJobParameters());
+			JobExecution jobExecution3 = jobLauncher.run(job, new JobParametersBuilder(jex)
+					.getNextJobParameters(job).addString("inputSize", "30").toJobParameters());
 		} catch (Exception e) {
 			e.printStackTrace();
 		}
