@@ -1,6 +1,8 @@
 package ar.juanedu.pocs.util;
 
 import lombok.*;
+import org.springframework.lang.Nullable;
+
 
 @Getter
 @Setter
@@ -13,4 +15,5 @@ public class Foo {
     private int counter;
     private String processor;
     private String totalSize;
+    private String auth;
 }
