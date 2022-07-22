@@ -9,6 +9,8 @@ import java.util.List;
 @Slf4j
 public class JmsSelectorItemWriter<T> extends JmsItemWriter<T> {
 
+    // Agrego el jmsTemplate porque es private en la superclase
+    // En el Reader es protected ¬¬
     private JmsOperations jmsTemplate;
     protected Long selector;
 
